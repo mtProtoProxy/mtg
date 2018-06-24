@@ -2,10 +2,12 @@ package telegram
 
 import (
 	"io"
+	"net"
 
 	"github.com/juju/errors"
 
 	"github.com/9seconds/mtg/config"
+	"github.com/9seconds/mtg/mtproto"
 	"github.com/9seconds/mtg/obfuscated2"
 	"github.com/9seconds/mtg/wrappers"
 )
@@ -31,18 +33,19 @@ type directTelegram struct {
 	baseTelegram
 }
 
-func (t *directTelegram) Dial(dcIdx int16) (io.ReadWriteCloser, error) {
-	if dcIdx < 0 {
-		dcIdx = -dcIdx
-	} else if dcIdx == 0 {
-		dcIdx = 1
+func (t *directTelegram) Dial(connOpts *mtproto.ConnectionOpts) (io.ReadWriteCloser, error) {
+	dc := connOpts.DC
+	if dc < 0 {
+		dc = -dc
+	} else if dc == 0 {
+		dc = 1
 	}
 
-	return t.baseTelegram.Dial(dcIdx - 1)
+	return t.baseTelegram.dial(dc - 1)
 }
 
-func (t *directTelegram) Init(conn io.ReadWriteCloser) (io.ReadWriteCloser, error) {
-	obfs2, frame := obfuscated2.MakeTelegramObfuscated2Frame()
+func (t *directTelegram) Init(connOpts *mtproto.ConnectionOpts, conn io.ReadWriteCloser) (io.ReadWriteCloser, error) {
+	obfs2, frame := obfuscated2.MakeTelegramObfuscated2Frame(connOpts)
 	defer obfuscated2.ReturnFrame(frame)
 
 	if n, err := conn.Write(*frame); err != nil || n != len(*frame) {
@@ -56,7 +59,7 @@ func (t *directTelegram) Init(conn io.ReadWriteCloser) (io.ReadWriteCloser, erro
 // to Telegram bypassing middleproxies.
 func NewDirectTelegram(conf *config.Config) Telegram {
 	return &directTelegram{baseTelegram{
-		dialer:      newDialer(conf),
+		dialer:      tgDialer{net.Dialer{Timeout: telegramDialTimeout}},
 		v4Addresses: directV4Addresses,
 		v6Addresses: directV6Addresses,
 	}}
