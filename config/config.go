@@ -5,24 +5,23 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"time"
+	"strings"
 
 	"github.com/juju/errors"
+	statsd "gopkg.in/alexcesaro/statsd.v2"
 )
 
 // Buffer sizes define internal socket buffer sizes.
 const (
 	BufferWriteSize = 32 * 1024
 	BufferReadSize  = 32 * 1024
-	BufferSizeCopy  = 32 * 1024
-
-	keepAlivePeriod = 20 * time.Second
 )
 
 // Config represents common configuration of mtg.
 type Config struct {
-	Debug   bool
-	Verbose bool
+	Debug      bool
+	Verbose    bool
+	SecureMode bool
 
 	BindPort       uint16
 	PublicIPv4Port uint16
@@ -34,7 +33,16 @@ type Config struct {
 	PublicIPv6 net.IP
 	StatsIP    net.IP
 
+	StatsD struct {
+		Addr       net.Addr
+		Prefix     string
+		Tags       map[string]string
+		TagsFormat statsd.TagFormat
+		Enabled    bool
+	}
+
 	Secret []byte
+	AdTag  []byte
 }
 
 // URLs contains links to the proxy (tg://, t.me) and their QR codes.
@@ -47,8 +55,9 @@ type URLs struct {
 
 // IPURLs contains links to both ipv4 and ipv6 of the proxy.
 type IPURLs struct {
-	IPv4 URLs `json:"ipv4"`
-	IPv6 URLs `json:"ipv6"`
+	IPv4      URLs   `json:"ipv4"`
+	IPv6      URLs   `json:"ipv6"`
+	BotSecret string `json:"secret_for_mtproxybot"`
 }
 
 // BindAddr returns connection for this server to bind to.
@@ -56,27 +65,45 @@ func (c *Config) BindAddr() string {
 	return getAddr(c.BindIP, c.BindPort)
 }
 
-// IPv4Addr returns connection string to ipv6 for mtproto proxy.
-func (c *Config) IPv4Addr() string {
-	return getAddr(c.PublicIPv4, c.PublicIPv4Port)
-}
-
-// IPv6Addr returns connection string to ipv6 for mtproto proxy.
-func (c *Config) IPv6Addr() string {
-	return getAddr(c.PublicIPv6, c.PublicIPv6Port)
-}
-
 // StatAddr returns connection string to the stats API.
 func (c *Config) StatAddr() string {
 	return getAddr(c.StatsIP, c.StatsPort)
 }
 
+// UseMiddleProxy defines if this proxy has to connect middle proxies
+// which supports promoted channels or directly access Telegram.
+func (c *Config) UseMiddleProxy() bool {
+	return len(c.AdTag) > 0
+}
+
+// BotSecretString returns secret string which should work with MTProxybot.
+func (c *Config) BotSecretString() string {
+	return hex.EncodeToString(c.Secret)
+}
+
+// SecretString returns a secret in a form entered on the start of the
+// application.
+func (c *Config) SecretString() string {
+	secret := c.BotSecretString()
+	if c.SecureMode {
+		return "dd" + secret
+	}
+	return secret
+}
+
 // GetURLs returns configured IPURLs instance with links to this server.
 func (c *Config) GetURLs() IPURLs {
-	return IPURLs{
-		IPv4: getURLs(c.PublicIPv4, c.PublicIPv4Port, c.Secret),
-		IPv6: getURLs(c.PublicIPv6, c.PublicIPv6Port, c.Secret),
+	urls := IPURLs{}
+	secret := c.SecretString()
+	if c.PublicIPv4 != nil {
+		urls.IPv4 = getURLs(c.PublicIPv4, c.PublicIPv4Port, secret)
 	}
+	if c.PublicIPv6 != nil {
+		urls.IPv6 = getURLs(c.PublicIPv6, c.PublicIPv6Port, secret)
+	}
+	urls.BotSecret = c.BotSecretString()
+
+	return urls
 }
 
 func getAddr(host fmt.Stringer, port uint16) string {
@@ -91,8 +118,14 @@ func NewConfig(debug, verbose bool, // nolint: gocyclo
 	publicIPv4 net.IP, PublicIPv4Port uint16,
 	publicIPv6 net.IP, publicIPv6Port uint16,
 	statsIP net.IP, statsPort uint16,
-	secret string) (*Config, error) {
-	if len(secret) != 32 {
+	secret, adtag string,
+	statsdIP string, statsdPort uint16, statsdNetwork string, statsdPrefix string,
+	statsdTagsFormat string, statsdTags map[string]string) (*Config, error) {
+	secureMode := false
+	if strings.HasPrefix(secret, "dd") && len(secret) == 34 {
+		secureMode = true
+		secret = strings.TrimPrefix(secret, "dd")
+	} else if len(secret) != 32 {
 		return nil, errors.New("Telegram demands secret of length 32")
 	}
 	secretBytes, err := hex.DecodeString(secret)
@@ -100,14 +133,21 @@ func NewConfig(debug, verbose bool, // nolint: gocyclo
 		return nil, errors.Annotate(err, "Cannot create config")
 	}
 
+	var adTagBytes []byte
+	if len(adtag) != 0 {
+		adTagBytes, err = hex.DecodeString(adtag)
+		if err != nil {
+			return nil, errors.Annotate(err, "Cannot create config")
+		}
+	}
+
 	if publicIPv4 == nil {
 		publicIPv4, err = getGlobalIPv4()
 		if err != nil {
-			return nil, errors.Errorf("Cannot get public IP")
+			publicIPv4 = nil
+		} else if publicIPv4.To4() == nil {
+			return nil, errors.Errorf("IP %s is not IPv4", publicIPv4.String())
 		}
-	}
-	if publicIPv4.To4() == nil {
-		return nil, errors.Errorf("IP %s is not IPv4", publicIPv4.String())
 	}
 	if PublicIPv4Port == 0 {
 		PublicIPv4Port = bindPort
@@ -116,11 +156,10 @@ func NewConfig(debug, verbose bool, // nolint: gocyclo
 	if publicIPv6 == nil {
 		publicIPv6, err = getGlobalIPv6()
 		if err != nil {
-			publicIPv6 = publicIPv4
+			publicIPv6 = nil
+		} else if publicIPv6.To4() != nil {
+			return nil, errors.Errorf("IP %s is not IPv6", publicIPv6.String())
 		}
-	}
-	if publicIPv6.To16() == nil {
-		return nil, errors.Errorf("IP %s is not IPv6", publicIPv6.String())
 	}
 	if publicIPv6Port == 0 {
 		publicIPv6Port = bindPort
@@ -142,30 +181,40 @@ func NewConfig(debug, verbose bool, // nolint: gocyclo
 		StatsIP:        statsIP,
 		StatsPort:      statsPort,
 		Secret:         secretBytes,
+		AdTag:          adTagBytes,
+		SecureMode:     secureMode,
+	}
+
+	if statsdIP != "" {
+		conf.StatsD.Enabled = true
+		conf.StatsD.Prefix = statsdPrefix
+		conf.StatsD.Tags = statsdTags
+
+		var addr net.Addr
+		hostPort := net.JoinHostPort(statsdIP, strconv.Itoa(int(statsdPort)))
+		switch statsdNetwork {
+		case "tcp":
+			addr, err = net.ResolveTCPAddr("tcp", hostPort)
+		case "udp":
+			addr, err = net.ResolveUDPAddr("udp", hostPort)
+		default:
+			err = errors.Errorf("Unknown network %s", statsdNetwork)
+		}
+		if err != nil {
+			return nil, errors.Annotate(err, "Cannot resolve statsd address")
+		}
+		conf.StatsD.Addr = addr
+
+		switch statsdTagsFormat {
+		case "datadog":
+			conf.StatsD.TagsFormat = statsd.Datadog
+		case "influxdb":
+			conf.StatsD.TagsFormat = statsd.InfluxDB
+		case "":
+		default:
+			return nil, errors.Errorf("Unknown tags format %s", statsdTagsFormat)
+		}
 	}
 
 	return conf, nil
-}
-
-// SetSocketOptions makes socket keepalive, sets buffer sizes
-func SetSocketOptions(conn net.Conn) error {
-	socket := conn.(*net.TCPConn)
-
-	if err := socket.SetReadBuffer(BufferReadSize); err != nil {
-		return errors.Annotate(err, "Cannot set read buffer size")
-	}
-	if err := socket.SetWriteBuffer(BufferWriteSize); err != nil {
-		return errors.Annotate(err, "Cannot set write buffer size")
-	}
-	if err := socket.SetKeepAlive(true); err != nil {
-		return errors.Annotate(err, "Cannot make socket keepalive")
-	}
-	if err := socket.SetKeepAlivePeriod(keepAlivePeriod); err != nil {
-		return errors.Annotate(err, "Cannot set keepalive period")
-	}
-	if err := socket.SetNoDelay(true); err != nil {
-		return errors.Annotate(err, "Cannot activate nodelay for the socket")
-	}
-
-	return nil
 }
