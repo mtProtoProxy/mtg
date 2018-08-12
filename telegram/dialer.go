@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"context"
 	"net"
 	"time"
 
@@ -10,11 +11,7 @@ import (
 	"github.com/9seconds/mtg/wrappers"
 )
 
-const (
-	telegramDialTimeout = 10 * time.Second
-	readBufferSize      = 64 * 1024
-	writeBufferSize     = 64 * 1024
-)
+const telegramDialTimeout = 10 * time.Second
 
 type tgDialer struct {
 	net.Dialer
@@ -32,22 +29,24 @@ func (t *tgDialer) dial(addr string) (net.Conn, error) {
 	if err = tcpSocket.SetNoDelay(true); err != nil {
 		return nil, errors.Annotate(err, "Cannot set NO_DELAY to Telegram")
 	}
-	if err = tcpSocket.SetReadBuffer(readBufferSize); err != nil {
+	if err = tcpSocket.SetReadBuffer(t.conf.WriteBufferSize); err != nil {
 		return nil, errors.Annotate(err, "Cannot set read buffer size on telegram socket")
 	}
-	if err = tcpSocket.SetWriteBuffer(writeBufferSize); err != nil {
+	if err = tcpSocket.SetWriteBuffer(t.conf.ReadBufferSize); err != nil {
 		return nil, errors.Annotate(err, "Cannot set write buffer size on telegram socket")
 	}
 
 	return conn, nil
 }
 
-func (t *tgDialer) dialRWC(addr, connID string) (wrappers.StreamReadWriteCloser, error) {
+func (t *tgDialer) dialRWC(ctx context.Context, cancel context.CancelFunc,
+	addr, connID string) (wrappers.StreamReadWriteCloser, error) {
 	conn, err := t.dial(addr)
 	if err != nil {
 		return nil, err
 	}
-	tgConn := wrappers.NewConn(conn, connID, wrappers.ConnPurposeTelegram, t.conf.PublicIPv4, t.conf.PublicIPv6)
+	tgConn := wrappers.NewConn(ctx, cancel, conn, connID,
+		wrappers.ConnPurposeTelegram, t.conf.PublicIPv4, t.conf.PublicIPv6)
 
 	return tgConn, nil
 }

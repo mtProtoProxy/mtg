@@ -24,7 +24,8 @@ var emptyIP = [4]byte{0x00, 0x00, 0x00, 0x00}
 
 // NewMiddleProxyCipher creates new block cipher to proxy<->telegram
 // connection.
-func NewMiddleProxyCipher(conn StreamReadWriteCloser, req *rpc.NonceRequest, resp *rpc.NonceResponse, secret []byte) StreamReadWriteCloser {
+func NewMiddleProxyCipher(conn StreamReadWriteCloser,
+	req *rpc.NonceRequest, resp *rpc.NonceResponse, secret []byte) StreamReadWriteCloser {
 	localAddr := conn.LocalAddr()
 	remoteAddr := conn.RemoteAddr()
 
@@ -37,11 +38,12 @@ func NewMiddleProxyCipher(conn StreamReadWriteCloser, req *rpc.NonceRequest, res
 	return NewBlockCipher(conn, enc, dec)
 }
 
-func deriveKeys(purpose cipherPurpose, req *rpc.NonceRequest, resp *rpc.NonceResponse, client *net.TCPAddr, remote *net.TCPAddr, secret []byte) ([]byte, []byte) {
+func deriveKeys(purpose cipherPurpose, req *rpc.NonceRequest, resp *rpc.NonceResponse,
+	client, remote *net.TCPAddr, secret []byte) ([]byte, []byte) {
 	message := bytes.Buffer{}
-	message.Write(resp.Nonce[:])
-	message.Write(req.Nonce[:])
-	message.Write(req.CryptoTS[:])
+	message.Write(resp.Nonce)
+	message.Write(req.Nonce)
+	message.Write(req.CryptoTS)
 
 	clientIPv4 := emptyIP[:]
 	serverIPv4 := emptyIP[:]
@@ -68,13 +70,13 @@ func deriveKeys(purpose cipherPurpose, req *rpc.NonceRequest, resp *rpc.NonceRes
 	binary.LittleEndian.PutUint16(port[:], uint16(remote.Port))
 	message.Write(port[:])
 	message.Write(secret)
-	message.Write(resp.Nonce[:])
+	message.Write(resp.Nonce)
 
 	if client.IP.To4() == nil {
 		message.Write(client.IP.To16())
 		message.Write(remote.IP.To16())
 	}
-	message.Write(req.Nonce[:])
+	message.Write(req.Nonce)
 
 	data := message.Bytes()
 	md5sum := md5.Sum(data[1:]) // nolint: gas

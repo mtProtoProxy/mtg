@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"io"
 	"net"
 	"sync"
@@ -43,8 +44,10 @@ func (p *Proxy) Serve() error {
 func (p *Proxy) accept(conn net.Conn) {
 	connID := uuid.NewV4().String()
 	log := zap.S().With("connection_id", connID).Named("main")
+	ctx, cancel := context.WithCancel(context.Background())
 
 	defer func() {
+		cancel()
 		conn.Close() // nolint: errcheck
 
 		if err := recover(); err != nil {
@@ -55,7 +58,7 @@ func (p *Proxy) accept(conn net.Conn) {
 
 	log.Infow("Client connected", "addr", conn.RemoteAddr())
 
-	clientConn, opts, err := p.clientInit(conn, connID, p.conf)
+	clientConn, opts, err := p.clientInit(ctx, cancel, conn, connID, p.conf)
 	if err != nil {
 		log.Errorw("Cannot initialize client connection", "error", err)
 		return
@@ -65,12 +68,18 @@ func (p *Proxy) accept(conn net.Conn) {
 	stats.ClientConnected(opts.ConnectionType, clientConn.RemoteAddr())
 	defer stats.ClientDisconnected(opts.ConnectionType, clientConn.RemoteAddr())
 
-	serverConn, err := p.getTelegramConn(opts, connID)
+	serverConn, err := p.getTelegramConn(ctx, cancel, opts, connID)
 	if err != nil {
 		log.Errorw("Cannot initialize server connection", "error", err)
 		return
 	}
 	defer serverConn.(io.Closer).Close() // nolint: errcheck
+
+	go func() {
+		<-ctx.Done()
+		serverConn.(io.Closer).Close()
+		clientConn.(io.Closer).Close()
+	}()
 
 	wait := &sync.WaitGroup{}
 	wait.Add(2)
@@ -83,8 +92,8 @@ func (p *Proxy) accept(conn net.Conn) {
 	} else {
 		clientStream := clientConn.(wrappers.StreamReadWriteCloser)
 		serverStream := serverConn.(wrappers.StreamReadWriteCloser)
-		go p.directPipe(clientStream, serverStream, wait)
-		go p.directPipe(serverStream, clientStream, wait)
+		go p.directPipe(clientStream, serverStream, wait, p.conf.ReadBufferSize)
+		go p.directPipe(serverStream, clientStream, wait, p.conf.WriteBufferSize)
 	}
 
 	wait.Wait()
@@ -92,8 +101,9 @@ func (p *Proxy) accept(conn net.Conn) {
 	log.Infow("Client disconnected", "addr", conn.RemoteAddr())
 }
 
-func (p *Proxy) getTelegramConn(opts *mtproto.ConnectionOpts, connID string) (wrappers.Wrap, error) {
-	streamConn, err := p.tg.Dial(connID, opts)
+func (p *Proxy) getTelegramConn(ctx context.Context, cancel context.CancelFunc,
+	opts *mtproto.ConnectionOpts, connID string) (wrappers.Wrap, error) {
+	streamConn, err := p.tg.Dial(ctx, cancel, connID, opts)
 	if err != nil {
 		return nil, errors.Annotate(err, "Cannot dial to Telegram")
 	}
@@ -106,7 +116,8 @@ func (p *Proxy) getTelegramConn(opts *mtproto.ConnectionOpts, connID string) (wr
 	return packetConn, nil
 }
 
-func (p *Proxy) middlePipe(src wrappers.PacketReadCloser, dst io.WriteCloser, wait *sync.WaitGroup, hacks *mtproto.Hacks) {
+func (p *Proxy) middlePipe(src wrappers.PacketReadCloser, dst io.WriteCloser,
+	wait *sync.WaitGroup, hacks *mtproto.Hacks) {
 	defer func() {
 		src.Close() // nolint: errcheck
 		dst.Close() // nolint: errcheck
@@ -129,14 +140,16 @@ func (p *Proxy) middlePipe(src wrappers.PacketReadCloser, dst io.WriteCloser, wa
 	}
 }
 
-func (p *Proxy) directPipe(src wrappers.StreamReadCloser, dst io.WriteCloser, wait *sync.WaitGroup) {
+func (p *Proxy) directPipe(src wrappers.StreamReadCloser, dst io.WriteCloser,
+	wait *sync.WaitGroup, bufferSize int) {
 	defer func() {
 		src.Close() // nolint: errcheck
 		dst.Close() // nolint: errcheck
 		wait.Done()
 	}()
 
-	if _, err := io.Copy(dst, src); err != nil {
+	buffer := make([]byte, bufferSize)
+	if _, err := io.CopyBuffer(dst, src, buffer); err != nil {
 		src.Logger().Warnw("Cannot pump sockets", "error", err)
 	}
 }
