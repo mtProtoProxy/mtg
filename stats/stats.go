@@ -1,102 +1,41 @@
 package stats
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"strconv"
-	"sync"
-	"time"
-
-	humanize "github.com/dustin/go-humanize"
+	"net"
+	"net/http"
 
 	"github.com/9seconds/mtg/config"
 )
 
-type uptime time.Time
+var Stats Interface
 
-func (u uptime) MarshalJSON() ([]byte, error) {
-	duration := time.Since(time.Time(u))
-	value := map[string]string{
-		"seconds": strconv.Itoa(int(duration.Seconds())),
-		"human":   humanize.Time(time.Time(u)),
+func Init(ctx context.Context) error {
+	mux := http.NewServeMux()
+
+	stats := []Interface{newStatsPrometheus(mux)}
+	if config.C.StatsdAddr != nil {
+		stats = append(stats, newStatsStatsd())
 	}
 
-	return json.Marshal(value)
-}
-
-type trafficValue uint64
-
-func (t trafficValue) MarshalJSON() ([]byte, error) {
-	tv := uint64(t)
-	value := map[string]interface{}{
-		"bytes": tv,
-		"human": humanize.Bytes(tv),
+	listener, err := net.Listen("tcp", config.C.StatsBind.String())
+	if err != nil {
+		return fmt.Errorf("cannot initialize stats server: %w", err)
 	}
 
-	return json.Marshal(value)
-}
-
-type trafficSpeedValue uint64
-
-func (t trafficSpeedValue) MarshalJSON() ([]byte, error) {
-	speed := uint64(t)
-	value := map[string]interface{}{
-		"bytes/s": speed,
-		"human":   fmt.Sprintf("%s/S", humanize.Bytes(speed)),
+	srv := http.Server{
+		Handler: mux,
 	}
 
-	return json.Marshal(value)
-}
+	go srv.Serve(listener) // nolint: errcheck
 
-type connections struct {
-	All          connectionType `json:"all"`
-	Abridged     connectionType `json:"abridged"`
-	Intermediate connectionType `json:"intermediate"`
-	Secure       connectionType `json:"secure"`
-}
+	go func() {
+		<-ctx.Done()
+		srv.Shutdown(context.Background()) // nolint: errcheck
+	}()
 
-func (c connections) MarshalJSON() ([]byte, error) {
-	c.All.IPv4 = c.Abridged.IPv4 + c.Intermediate.IPv4 + c.Secure.IPv4
-	c.All.IPv6 = c.Abridged.IPv6 + c.Intermediate.IPv6 + c.Secure.IPv6
+	Stats = multiStats(stats)
 
-	value := struct {
-		All          connectionType `json:"all"`
-		Abridged     connectionType `json:"abridged"`
-		Intermediate connectionType `json:"intermediate"`
-		Secure       connectionType `json:"secure"`
-	}{
-		All:          c.All,
-		Abridged:     c.Abridged,
-		Intermediate: c.Intermediate,
-		Secure:       c.Secure,
-	}
-
-	return json.Marshal(value)
-}
-
-type connectionType struct {
-	IPv6 uint32 `json:"ipv6"`
-	IPv4 uint32 `json:"ipv4"`
-}
-
-type traffic struct {
-	Ingress trafficValue `json:"ingress"`
-	Egress  trafficValue `json:"egress"`
-}
-
-type speed struct {
-	Ingress trafficSpeedValue `json:"ingress"`
-	Egress  trafficSpeedValue `json:"egress"`
-}
-
-type stats struct {
-	URLs        config.IPURLs `json:"urls"`
-	Connections connections   `json:"connections"`
-	Traffic     traffic       `json:"traffic"`
-	Speed       speed         `json:"speed"`
-	Uptime      uptime        `json:"uptime"`
-	Crashes     uint32        `json:"crashes"`
-
-	speedCurrent speed
-	mutex        *sync.RWMutex
+	return nil
 }

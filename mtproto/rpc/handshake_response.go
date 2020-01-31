@@ -2,12 +2,10 @@ package rpc
 
 import (
 	"bytes"
-
-	"github.com/juju/errors"
+	"errors"
+	"fmt"
 )
 
-// HandshakeResponse defines data structure which is used for storage of
-// handshake response.
 type HandshakeResponse struct {
 	Type      []byte
 	Flags     []byte
@@ -19,21 +17,22 @@ type HandshakeResponse struct {
 func (r *HandshakeResponse) Bytes() []byte {
 	buf := &bytes.Buffer{}
 
-	buf.Write(r.Type)
-	buf.Write(r.Flags)
-	buf.Write(r.SenderPID)
-	buf.Write(r.PeerPID)
+	buf.Write(r.Type)      // nolint: gosec
+	buf.Write(r.Flags)     // nolint: gosec
+	buf.Write(r.SenderPID) // nolint: gosec
+	buf.Write(r.PeerPID)   // nolint: gosec
 
 	return buf.Bytes()
 }
 
 // Valid checks that handshake response compliments request.
-func (r *HandshakeResponse) Valid(req *HandshakeRequest) error {
+func (r *HandshakeResponse) Valid() error {
 	if !bytes.Equal(r.Type, TagHandshake) {
-		return errors.New("Unexpected handshake tag")
+		return errors.New("unexpected handshake tag")
 	}
+
 	if !bytes.Equal(r.PeerPID, HandshakeSenderPID) {
-		return errors.New("Incorrect sender PID")
+		return errors.New("incorrect sender PID")
 	}
 
 	return nil
@@ -43,7 +42,7 @@ func (r *HandshakeResponse) Valid(req *HandshakeRequest) error {
 // data.
 func NewHandshakeResponse(data []byte) (*HandshakeResponse, error) {
 	if len(data) != 32 {
-		return nil, errors.New("Incorrect handshake response length")
+		return nil, fmt.Errorf("incorrect handshake response length %d", len(data))
 	}
 
 	return &HandshakeResponse{
