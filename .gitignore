@@ -7,5 +7,7 @@
 *.out
 mtg
 vendor/
-version.go
 ccbuilds/
+.bin/
+coverage.txt
+dist/

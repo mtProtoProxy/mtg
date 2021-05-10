@@ -1,20 +1,17 @@
+// Antireplay package has cache implementations that are effective
+// against replay attacks.
+//
+// To understand more about replay attacks, please read documentation
+// for mtglib.AntiReplayCache interface. This package has a list of some
+// implementations of this interface.
 package antireplay
 
-import (
-	"sync"
+const (
+	// DefaultStableBloomFilterMaxSize is a recommended byte size for a
+	// stable bloom filter.
+	DefaultStableBloomFilterMaxSize = 1024 * 1024 // 1MiB
 
-	"github.com/VictoriaMetrics/fastcache"
-
-	"github.com/9seconds/mtg/config"
+	// DefaultStableBloomFilterErrorRate is a recommended default error
+	// rate for a stable bloom filter.
+	DefaultStableBloomFilterErrorRate = 0.001
 )
-
-var (
-	Cache    cache
-	initOnce sync.Once
-)
-
-func Init() {
-	initOnce.Do(func() {
-		Cache.data = fastcache.New(config.C.AntiReplayMaxSize)
-	})
-}
